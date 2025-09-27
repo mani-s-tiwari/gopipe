@@ -1,3 +1,3 @@
-module gopipe
+module github.com/mani-s-tiwari/gopipe
 
-go 1.25.1
+go 1.22
