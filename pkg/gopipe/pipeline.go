@@ -112,3 +112,16 @@ func (p *Pipeline) AddMiddleware(middleware Middleware) {
 		}
 	}
 }
+
+// Global pipeline instance (optional, for demos)
+var globalPipeline *Pipeline
+
+// SetGlobalPipeline sets the shared pipeline instance
+func SetGlobalPipeline(p *Pipeline) {
+	globalPipeline = p
+}
+
+// GlobalPipeline gets the shared pipeline instance
+func GlobalPipeline() *Pipeline {
+	return globalPipeline
+}
