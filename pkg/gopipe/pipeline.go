@@ -7,25 +7,45 @@ import (
 	"github.com/mani-s-tiwari/gopipe/internal/utils"
 )
 
-// Pipeline orchestrates task processing with multiple worker pools
+// ExecutionMode determines how the pipeline runs
+type ExecutionMode int
+
+const (
+	ModeWorkerPool ExecutionMode = iota
+	ModeActor
+	ModeGossip
+	ModeManager
+)
+
+// Pipeline orchestrates task processing with multiple strategies
 type Pipeline struct {
+	mode        ExecutionMode
 	workerPools map[string]*WorkerPool
 	middlewares map[string][]Middleware
-	handlers    map[string]Handler // base handlers (before middleware)
+	handlers    map[string]Handler // base handlers
 
-	router   *Router
-	metrics  *Metrics
-	mu       sync.RWMutex
-	ctx      context.Context
-	cancel   context.CancelFunc
-	submitWg *utils.SizedWaitGroup
+	actorSystem   *ActorSystem
+	gossipCluster *GossipCluster
+	manager       *ManagerWorker
+
+	router      *Router
+	metrics     *Metrics
+	mu          sync.RWMutex
+	ctx         context.Context
+	cancel      context.CancelFunc
+	submitWg    *utils.SizedWaitGroup
+	connections []*Pipeline // 🔗 downstream pipelines
 }
 
-// NewPipeline creates a new pipeline
+// --- Constructors ---
 func NewPipeline() *Pipeline {
-	ctx, cancel := context.WithCancel(context.Background())
+	return NewPipelineWithMode(ModeWorkerPool)
+}
 
+func NewPipelineWithMode(mode ExecutionMode) *Pipeline {
+	ctx, cancel := context.WithCancel(context.Background())
 	return &Pipeline{
+		mode:        mode,
 		workerPools: make(map[string]*WorkerPool),
 		middlewares: make(map[string][]Middleware),
 		handlers:    make(map[string]Handler),
@@ -34,94 +54,132 @@ func NewPipeline() *Pipeline {
 		ctx:         ctx,
 		cancel:      cancel,
 		submitWg:    utils.NewSizedWaitGroup(100),
+		connections: []*Pipeline{},
+		actorSystem: NewActorSystem(),
 	}
 }
 
-// RegisterHandler registers a handler for a task type with middlewares
+// --- Handler Registration ---
 func (p *Pipeline) RegisterHandler(taskType string, handler Handler, middlewares ...Middleware) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
-	// store base handler
 	p.handlers[taskType] = handler
-
-	// build chain
 	chained := Chain(middlewares...)(handler)
-	wp := NewWorkerPool(10, chained)
 
-	p.workerPools[taskType] = wp
-	p.middlewares[taskType] = middlewares
-	p.router.AddRoute(taskType, wp)
+	switch p.mode {
+	case ModeWorkerPool:
+		wp := NewWorkerPool(10, chained)
+		p.workerPools[taskType] = wp
+		p.middlewares[taskType] = middlewares
+		p.router.AddRoute(taskType, wp)
+
+	case ModeActor:
+		p.actorSystem.RegisterActor(taskType, chained)
+
+	case ModeManager:
+		if p.manager == nil {
+			p.manager = NewManagerWorker(5, chained)
+		}
+
+	case ModeGossip:
+		// Gossip uses connected pipelines; handlers are registered downstream
+	}
 }
 
-// Submit sends a task to the pipeline
+// --- Task Submission ---
 func (p *Pipeline) Submit(task *Task) error {
 	p.metrics.TasksSubmitted.Inc()
 	p.submitWg.Add()
 	defer p.submitWg.Done()
 
-	// Route task to appropriate worker pool
-	workerPool, err := p.router.Route(task)
-	if err != nil {
-		return err
+	var err error
+	switch p.mode {
+	case ModeWorkerPool:
+		workerPool, e := p.router.Route(task)
+		if e != nil {
+			return e
+		}
+		err = workerPool.Submit(task)
+
+	case ModeActor:
+		err = p.actorSystem.Submit(task)
+
+	case ModeManager:
+		if p.manager != nil {
+			err = p.manager.Submit(task)
+		}
+
+	case ModeGossip:
+		for _, conn := range p.connections {
+			go conn.Submit(task) // gossip broadcast
+		}
 	}
-	return workerPool.Submit(task)
+	return err
 }
 
-// SubmitAndWait sends a task and waits for result
 func (p *Pipeline) SubmitAndWait(task *Task) TaskResult {
 	if err := p.Submit(task); err != nil {
-		return TaskResult{
-			TaskID:  task.ID,
-			Error:   err,
-			Success: false,
-		}
+		return TaskResult{TaskID: task.ID, Error: err, Success: false}
 	}
 	return task.WaitForResult()
 }
 
-// GetMetrics returns pipeline metrics
+// --- Metrics ---
 func (p *Pipeline) GetMetrics() *Metrics {
 	return p.metrics
 }
 
-// Stop gracefully stops the pipeline
+// --- Stop ---
 func (p *Pipeline) Stop() {
 	p.cancel()
-
-	p.mu.RLock()
-	defer p.mu.RUnlock()
-
-	for _, wp := range p.workerPools {
-		wp.Stop()
-	}
-}
-
-// AddMiddleware adds global middleware to all handlers
-func (p *Pipeline) AddMiddleware(middleware Middleware) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-
-	for taskType, handler := range p.handlers {
-		// prepend global middleware
-		p.middlewares[taskType] = append([]Middleware{middleware}, p.middlewares[taskType]...)
-		chained := Chain(p.middlewares[taskType]...)(handler)
-
-		if wp, ok := p.workerPools[taskType]; ok {
-			wp.UpdateHandler(chained) // update in-place
+	switch p.mode {
+	case ModeWorkerPool:
+		p.mu.RLock()
+		for _, wp := range p.workerPools {
+			wp.Stop()
+		}
+		p.mu.RUnlock()
+	case ModeActor:
+		p.actorSystem.Stop()
+	case ModeManager:
+		if p.manager != nil {
+			p.manager.Stop()
+		}
+	case ModeGossip:
+		for _, conn := range p.connections {
+			conn.Stop()
 		}
 	}
 }
 
-// Global pipeline instance (optional, for demos)
+// --- Middleware ---
+func (p *Pipeline) AddMiddleware(middleware Middleware) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	if p.mode != ModeWorkerPool {
+		return // global middlewares only apply in WorkerPool mode
+	}
+
+	for taskType, handler := range p.handlers {
+		p.middlewares[taskType] = append([]Middleware{middleware}, p.middlewares[taskType]...)
+		chained := Chain(p.middlewares[taskType]...)(handler)
+		if wp, ok := p.workerPools[taskType]; ok {
+			wp.UpdateHandler(chained)
+		}
+	}
+}
+
+// --- Connections (for Gossip / DAG pipelines) ---
+func (p *Pipeline) Connect(other *Pipeline) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.connections = append(p.connections, other)
+}
+
+// --- Global Pipeline (optional, for demos) ---
 var globalPipeline *Pipeline
 
-// SetGlobalPipeline sets the shared pipeline instance
-func SetGlobalPipeline(p *Pipeline) {
-	globalPipeline = p
-}
-
-// GlobalPipeline gets the shared pipeline instance
-func GlobalPipeline() *Pipeline {
-	return globalPipeline
-}
+func SetGlobalPipeline(p *Pipeline) { globalPipeline = p }
+func GlobalPipeline() *Pipeline     { return globalPipeline }
