@@ -2,8 +2,9 @@ package gopipe
 
 import (
 	"context"
-	"gopipe/internal/utils"
 	"sync"
+
+	"github.com/mani-s-tiwari/gopipe/internal/utils"
 )
 
 // Pipeline orchestrates task processing with multiple worker pools

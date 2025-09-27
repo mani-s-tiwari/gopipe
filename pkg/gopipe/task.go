@@ -3,8 +3,9 @@ package gopipe
 import (
 	"context"
 	"encoding/json"
-	"gopipe/internal/utils"
 	"time"
+
+	"github.com/mani-s-tiwari/gopipe/internal/utils"
 )
 
 // TaskPriority defines task priority levels
@@ -50,7 +51,7 @@ type TaskResult struct {
 // NewTask creates a new task with context and timeout
 func NewTask(name string, payload []byte, opts ...TaskOption) *Task {
 	task := &Task{
-		ID:         utils.GenerateTaskID(), 
+		ID:         utils.GenerateTaskID(),
 		Name:       name,
 		Payload:    payload,
 		Metadata:   make(map[string]interface{}),

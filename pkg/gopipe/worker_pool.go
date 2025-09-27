@@ -3,9 +3,10 @@ package gopipe
 import (
 	"container/heap"
 	"context"
-	"gopipe/internal/utils"
 	"sync"
 	"time"
+
+	"github.com/mani-s-tiwari/gopipe/internal/utils"
 )
 
 // PriorityQueue implements heap.Interface for prioritized tasks

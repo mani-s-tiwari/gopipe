@@ -3,7 +3,7 @@ package gopipe
 import (
 	"context"
 	"fmt"
-	"gopipe/internal/utils"
+	"github.com/mani-s-tiwari/gopipe/internal/utils"
 	"math/rand"
 	"time"
 )
