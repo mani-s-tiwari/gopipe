@@ -9,6 +9,15 @@ import (
 	"github.com/mani-s-tiwari/gopipe/internal/utils"
 )
 
+// --- Scheduling Strategies ---
+type SchedulingStrategy int
+
+const (
+	ScheduleFIFO SchedulingStrategy = iota
+	ScheduleStrictPriority
+	ScheduleWeightedRandom
+)
+
 // PriorityQueue implements heap.Interface for prioritized tasks
 type PriorityQueue []*Task
 
@@ -47,6 +56,8 @@ type WorkerPool struct {
 	handler       Handler
 	metrics       *Metrics
 	rateLimiter   *utils.RateLimiter
+
+	scheduling SchedulingStrategy
 }
 
 // NewWorkerPool creates a new worker pool
@@ -61,11 +72,17 @@ func NewWorkerPool(maxWorkers int, handler Handler) *WorkerPool {
 		cancel:        cancel,
 		handler:       handler,
 		metrics:       NewMetrics(),
+		scheduling:    ScheduleStrictPriority, // default
 	}
 
 	heap.Init(&wp.priorityQueue)
 	wp.start()
 	return wp
+}
+
+// SetScheduling sets the scheduling strategy
+func (wp *WorkerPool) SetScheduling(strategy SchedulingStrategy) {
+	wp.scheduling = strategy
 }
 
 // Submit adds a task to the pool
@@ -84,6 +101,8 @@ func (wp *WorkerPool) Submit(task *Task) error {
 		return nil
 	}
 }
+
+// WithRateLimit sets rate limiter
 func (wp *WorkerPool) WithRateLimit(rate float64, capacity float64) {
 	wp.rateLimiter = utils.NewRateLimiter(rate, capacity)
 }
@@ -124,12 +143,55 @@ func (wp *WorkerPool) processPriorityQueue() {
 		case <-ticker.C:
 			wp.queueMutex.Lock()
 			for wp.priorityQueue.Len() > 0 && len(wp.taskQueue) < cap(wp.taskQueue) {
-				task := heap.Pop(&wp.priorityQueue).(*Task)
-				wp.taskQueue <- task
+				var task *Task
+
+				switch wp.scheduling {
+				case ScheduleFIFO:
+					// pop oldest (like queue)
+					task = heap.Pop(&wp.priorityQueue).(*Task)
+
+				case ScheduleStrictPriority:
+					// always pop highest priority
+					task = heap.Pop(&wp.priorityQueue).(*Task)
+
+				case ScheduleWeightedRandom:
+					// pick weighted random
+					task = wp.popTaskWeighted()
+				}
+
+				if task != nil {
+					wp.taskQueue <- task
+				}
 			}
 			wp.queueMutex.Unlock()
 		}
 	}
+}
+
+// --- Weighted Scheduling Helper ---
+func (wp *WorkerPool) popTaskWeighted() *Task {
+	if wp.priorityQueue.Len() == 0 {
+		return nil
+	}
+
+	weights := make([]float64, wp.priorityQueue.Len())
+	items := make([]*Task, wp.priorityQueue.Len())
+	for i, task := range wp.priorityQueue {
+		items[i] = task
+		weights[i] = float64(task.Priority + 1) // higher priority = bigger weight
+	}
+
+	// Pick random index
+	task := utils.WeightedRandom(items, weights)
+
+	// Remove picked task from queue
+	for i, t := range wp.priorityQueue {
+		if t == task {
+			heap.Remove(&wp.priorityQueue, i)
+			break
+		}
+	}
+	return task
 }
 
 func (wp *WorkerPool) processTask(task *Task) {

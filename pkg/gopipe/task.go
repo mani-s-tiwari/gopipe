@@ -22,6 +22,7 @@ const (
 type Task struct {
 	ID           string                 `json:"id"`
 	Name         string                 `json:"name"`
+	Type         string                 `json:"type"`
 	Payload      json.RawMessage        `json:"payload"`
 	Metadata     map[string]interface{} `json:"metadata"`
 	Priority     TaskPriority           `json:"priority"`
@@ -49,10 +50,11 @@ type TaskResult struct {
 }
 
 // NewTask creates a new task with context and timeout
-func NewTask(name string, payload []byte, opts ...TaskOption) *Task {
+func NewTask(taskType string, payload []byte, opts ...TaskOption) *Task {
 	task := &Task{
 		ID:         utils.GenerateTaskID(),
-		Name:       name,
+		Type:       taskType, // used for routing
+		Name:       taskType, // default name = type (can override with WithName)
 		Payload:    payload,
 		Metadata:   make(map[string]interface{}),
 		Priority:   PriorityNormal,
@@ -76,6 +78,12 @@ type TaskOption func(*Task)
 func WithPriority(priority TaskPriority) TaskOption {
 	return func(t *Task) {
 		t.Priority = priority
+	}
+}
+
+func WithName(name string) TaskOption {
+	return func(t *Task) {
+		t.Name = name
 	}
 }
 
@@ -122,22 +130,4 @@ func (t *Task) Complete(result TaskResult) {
 		// Already completed
 	}
 	t.cancel()
-}
-
-func (wp *WorkerPool) popTaskWeighted() *Task {
-	wp.queueMutex.Lock()
-	defer wp.queueMutex.Unlock()
-
-	if wp.priorityQueue.Len() == 0 {
-		return nil
-	}
-
-	weights := make([]float64, wp.priorityQueue.Len())
-	items := make([]*Task, wp.priorityQueue.Len())
-	for i, task := range wp.priorityQueue {
-		items[i] = task
-		weights[i] = float64(task.Priority + 1) // higher priority = bigger weight
-	}
-
-	return utils.WeightedRandom(items, weights)
 }

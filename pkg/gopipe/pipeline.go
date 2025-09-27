@@ -35,6 +35,7 @@ type Pipeline struct {
 	cancel      context.CancelFunc
 	submitWg    *utils.SizedWaitGroup
 	connections []*Pipeline // 🔗 downstream pipelines
+	rrIndex     int         // round-robin index for forwarding
 }
 
 // --- Constructors ---
@@ -83,7 +84,7 @@ func (p *Pipeline) RegisterHandler(taskType string, handler Handler, middlewares
 		}
 
 	case ModeGossip:
-		// Gossip uses connected pipelines; handlers are registered downstream
+		// Gossip uses connected pipelines; handlers live downstream
 	}
 }
 
@@ -111,10 +112,10 @@ func (p *Pipeline) Submit(task *Task) error {
 		}
 
 	case ModeGossip:
-		for _, conn := range p.connections {
-			go conn.Submit(task) // gossip broadcast
-		}
+		// Gossip: forward to connected pipelines
+		p.forwardToConnections(task, false) // default: round-robin
 	}
+
 	return err
 }
 
@@ -123,6 +124,28 @@ func (p *Pipeline) SubmitAndWait(task *Task) TaskResult {
 		return TaskResult{TaskID: task.ID, Error: err, Success: false}
 	}
 	return task.WaitForResult()
+}
+
+// --- Forwarding (fan-out / round-robin) ---
+func (p *Pipeline) forwardToConnections(task *Task, fanout bool) {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+
+	if len(p.connections) == 0 {
+		return
+	}
+
+	if fanout {
+		// Send to all
+		for _, conn := range p.connections {
+			go conn.Submit(task)
+		}
+	} else {
+		// Round-robin
+		conn := p.connections[p.rrIndex%len(p.connections)]
+		p.rrIndex++
+		go conn.Submit(task)
+	}
 }
 
 // --- Metrics ---
@@ -171,12 +194,120 @@ func (p *Pipeline) AddMiddleware(middleware Middleware) {
 	}
 }
 
-// --- Connections (for Gossip / DAG pipelines) ---
+// --- Connections (for Gossip / DAG / Workflow) ---
+
+// Connect: simple connection (round-robin or fanout based on forwardToConnections)
 func (p *Pipeline) Connect(other *Pipeline) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.connections = append(p.connections, other)
 }
+
+// ConnectTo: workflow chaining (fromTask → toTask in other pipeline)
+func (p *Pipeline) ConnectTo(other *Pipeline, fromTask, toTask string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	if handler, ok := p.handlers[fromTask]; ok {
+		wrapped := func(ctx context.Context, task *Task) error {
+			// run original handler
+			err := handler(ctx, task)
+			if err != nil {
+				return err
+			}
+
+			// auto-forward
+			next := NewTask(toTask, task.Payload)
+			return other.Submit(next)
+		}
+
+		middlewares := p.middlewares[fromTask]
+		chained := Chain(middlewares...)(wrapped)
+		if wp, exists := p.workerPools[fromTask]; exists {
+			wp.UpdateHandler(chained)
+		}
+	}
+	p.connections = append(p.connections, other)
+}
+
+// ConnectIf: conditional connection (forward only if condition is true)
+func (p *Pipeline) ConnectIf(other *Pipeline, fromTask, toTask string, cond func(*Task) bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	if handler, ok := p.handlers[fromTask]; ok {
+		wrapped := func(ctx context.Context, task *Task) error {
+			err := handler(ctx, task)
+			if err != nil {
+				return err
+			}
+			if cond(task) {
+				next := NewTask(toTask, task.Payload)
+				return other.Submit(next)
+			}
+			return nil
+		}
+		middlewares := p.middlewares[fromTask]
+		chained := Chain(middlewares...)(wrapped)
+		if wp, exists := p.workerPools[fromTask]; exists {
+			wp.UpdateHandler(chained)
+		}
+	}
+	p.connections = append(p.connections, other)
+}
+
+// ConnectTransform: transform payload/metadata before forwarding
+func (p *Pipeline) ConnectTransform(other *Pipeline, fromTask, toTask string, f func(*Task) *Task) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	if handler, ok := p.handlers[fromTask]; ok {
+		wrapped := func(ctx context.Context, task *Task) error {
+			err := handler(ctx, task)
+			if err != nil {
+				return err
+			}
+			next := f(task)
+			next.Type = toTask
+			return other.Submit(next)
+		}
+		middlewares := p.middlewares[fromTask]
+		chained := Chain(middlewares...)(wrapped)
+		if wp, exists := p.workerPools[fromTask]; exists {
+			wp.UpdateHandler(chained)
+		}
+	}
+	p.connections = append(p.connections, other)
+}
+
+// MultiConnect: one task → multiple downstream pipelines (fan-out by mapping)
+func (p *Pipeline) MultiConnect(links map[string]struct {
+	Other  *Pipeline
+	ToTask string
+}) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	for fromTask, link := range links {
+		if handler, ok := p.handlers[fromTask]; ok {
+			wrapped := func(ctx context.Context, task *Task) error {
+				err := handler(ctx, task)
+				if err != nil {
+					return err
+				}
+				next := NewTask(link.ToTask, task.Payload)
+				return link.Other.Submit(next)
+			}
+			middlewares := p.middlewares[fromTask]
+			chained := Chain(middlewares...)(wrapped)
+			if wp, exists := p.workerPools[fromTask]; exists {
+				wp.UpdateHandler(chained)
+			}
+			p.connections = append(p.connections, link.Other)
+		}
+	}
+}
+
 
 // --- Global Pipeline (optional, for demos) ---
 var globalPipeline *Pipeline
