@@ -280,33 +280,38 @@ func (p *Pipeline) ConnectTransform(other *Pipeline, fromTask, toTask string, f 
 	p.connections = append(p.connections, other)
 }
 
-// MultiConnect: one task → multiple downstream pipelines (fan-out by mapping)
-func (p *Pipeline) MultiConnect(links map[string]struct {
+// MultiConnect: fan-out to multiple downstream pipelines
+func (p *Pipeline) MultiConnect(fromTask string, links []struct {
 	Other  *Pipeline
 	ToTask string
 }) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
-	for fromTask, link := range links {
-		if handler, ok := p.handlers[fromTask]; ok {
-			wrapped := func(ctx context.Context, task *Task) error {
-				err := handler(ctx, task)
-				if err != nil {
-					return err
-				}
+	if handler, ok := p.handlers[fromTask]; ok {
+		wrapped := func(ctx context.Context, task *Task) error {
+			err := handler(ctx, task)
+			if err != nil {
+				return err
+			}
+			// fan-out to all
+			for _, link := range links {
 				next := NewTask(link.ToTask, task.Payload)
-				return link.Other.Submit(next)
+				_ = link.Other.Submit(next)
 			}
-			middlewares := p.middlewares[fromTask]
-			chained := Chain(middlewares...)(wrapped)
-			if wp, exists := p.workerPools[fromTask]; exists {
-				wp.UpdateHandler(chained)
-			}
+			return nil
+		}
+		middlewares := p.middlewares[fromTask]
+		chained := Chain(middlewares...)(wrapped)
+		if wp, exists := p.workerPools[fromTask]; exists {
+			wp.UpdateHandler(chained)
+		}
+		for _, link := range links {
 			p.connections = append(p.connections, link.Other)
 		}
 	}
 }
+
 
 
 // --- Global Pipeline (optional, for demos) ---
