@@ -75,6 +75,15 @@ func NewTask(taskType string, payload []byte, opts ...TaskOption) *Task {
 // TaskOption functional options for task configuration
 type TaskOption func(*Task)
 
+func RehydrateTask(t *Task) {
+	if t.resultChan == nil {
+		t.resultChan = make(chan TaskResult, 1)
+	}
+	if t.ctx == nil {
+		t.ctx, t.cancel = context.WithTimeout(context.Background(), t.Timeout)
+	}
+}
+
 func WithPriority(priority TaskPriority) TaskOption {
 	return func(t *Task) {
 		t.Priority = priority
