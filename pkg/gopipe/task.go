@@ -1,0 +1,142 @@
+package gopipe
+
+import (
+	"context"
+	"encoding/json"
+	"gopipe/internal/utils"
+	"time"
+)
+
+// TaskPriority defines task priority levels
+type TaskPriority int
+
+const (
+	PriorityLow TaskPriority = iota
+	PriorityNormal
+	PriorityHigh
+	PriorityCritical
+)
+
+// Task represents an enhanced task unit
+type Task struct {
+	ID           string                 `json:"id"`
+	Name         string                 `json:"name"`
+	Payload      json.RawMessage        `json:"payload"`
+	Metadata     map[string]interface{} `json:"metadata"`
+	Priority     TaskPriority           `json:"priority"`
+	Retries      int                    `json:"retries"`
+	MaxRetries   int                    `json:"max_retries"`
+	Timeout      time.Duration          `json:"timeout"`
+	CreatedAt    time.Time              `json:"created_at"`
+	ScheduledFor time.Time              `json:"scheduled_for"`
+
+	// Internal fields
+	ctx        context.Context
+	cancel     context.CancelFunc
+	resultChan chan TaskResult
+	attempts   int
+}
+
+// TaskResult represents task execution result
+type TaskResult struct {
+	TaskID   string        `json:"task_id"`
+	Output   interface{}   `json:"output"`
+	Error    error         `json:"error"`
+	Duration time.Duration `json:"duration"`
+	Attempts int           `json:"attempts"`
+	Success  bool          `json:"success"`
+}
+
+// NewTask creates a new task with context and timeout
+func NewTask(name string, payload []byte, opts ...TaskOption) *Task {
+	task := &Task{
+		ID:         utils.GenerateTaskID(), 
+		Name:       name,
+		Payload:    payload,
+		Metadata:   make(map[string]interface{}),
+		Priority:   PriorityNormal,
+		MaxRetries: 3,
+		Timeout:    30 * time.Second,
+		CreatedAt:  time.Now(),
+		resultChan: make(chan TaskResult, 1),
+	}
+
+	for _, opt := range opts {
+		opt(task)
+	}
+
+	task.ctx, task.cancel = context.WithTimeout(context.Background(), task.Timeout)
+	return task
+}
+
+// TaskOption functional options for task configuration
+type TaskOption func(*Task)
+
+func WithPriority(priority TaskPriority) TaskOption {
+	return func(t *Task) {
+		t.Priority = priority
+	}
+}
+
+func WithTimeout(timeout time.Duration) TaskOption {
+	return func(t *Task) {
+		t.Timeout = timeout
+	}
+}
+
+func WithMetadata(key string, value interface{}) TaskOption {
+	return func(t *Task) {
+		if t.Metadata == nil {
+			t.Metadata = make(map[string]interface{})
+		}
+		t.Metadata[key] = value
+	}
+}
+
+func WithScheduledTime(t time.Time) TaskOption {
+	return func(task *Task) {
+		task.ScheduledFor = t
+	}
+}
+
+// WaitForResult waits for task completion and returns result
+func (t *Task) WaitForResult() TaskResult {
+	select {
+	case result := <-t.resultChan:
+		return result
+	case <-t.ctx.Done():
+		return TaskResult{
+			TaskID:  t.ID,
+			Error:   t.ctx.Err(),
+			Success: false,
+		}
+	}
+}
+
+// Complete signals task completion
+func (t *Task) Complete(result TaskResult) {
+	select {
+	case t.resultChan <- result:
+	default:
+		// Already completed
+	}
+	t.cancel()
+}
+
+func (wp *WorkerPool) popTaskWeighted() *Task {
+	wp.queueMutex.Lock()
+	defer wp.queueMutex.Unlock()
+
+	if wp.priorityQueue.Len() == 0 {
+		return nil
+	}
+
+	weights := make([]float64, wp.priorityQueue.Len())
+	items := make([]*Task, wp.priorityQueue.Len())
+	for i, task := range wp.priorityQueue {
+		items[i] = task
+		weights[i] = float64(task.Priority + 1) // higher priority = bigger weight
+	}
+
+	return utils.WeightedRandom(items, weights)
+}
