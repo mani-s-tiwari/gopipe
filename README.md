@@ -1,4 +1,18 @@
-# GoPipe 
+# GoPipe <svg xmlns="http://www.w3.org/2000/svg" width="48" height="48" viewBox="0 0 100 100">
+  <!-- Pipe shape -->
+  <rect x="10" y="40" width="80" height="20" rx="5" ry="5" fill="#00ADD8"/>
+  
+  <!-- Data flow arrows -->
+  <polygon points="15,30 25,40 15,50" fill="white"/>
+  <polygon points="45,30 55,40 45,50" fill="white"/>
+  <polygon points="75,30 85,40 75,50" fill="white"/>
+  
+  <!-- Text -->
+  <text x="50" y="85" font-size="14" text-anchor="middle" fill="#333" font-family="Arial, sans-serif">
+    GoPipe
+  </text>
+</svg>
+
 
 **GoPipe** is an experimental **task orchestration & communication library in Go**.  
 It started with a simple worker pool, but grew into a playground for exploring:
