@@ -1,5 +1,5 @@
-<img width="500" height="500" alt="svgviewer-png-output" src="https://github.com/user-attachments/assets/438fa7da-3fcd-490a-8531-f1b6fe8d85a2" />
-# GoPipe <img src="https://github.com/user-attachments/assets/72f56a0b-389a-46be-98f9-ebed4b7e4eb7" alt="GoPipe Logo" width="40" height="40" style="vertical-align: middle;"/>
+# <img src="https://github.com/user-attachments/assets/438fa7da-3fcd-490a-8531-f1b6fe8d85a2" alt="GoPipe Logo" width="40" height="40" style="vertical-align: middle;"/> GoPipe
+
 
 
 **GoPipe** is an experimental **task orchestration & communication library in Go**.  
